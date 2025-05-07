@@ -76,11 +76,36 @@ class _IotSmsListenerPageState extends State<IotSmsListenerPage> {
   final telephony = Telephony.instance;
   final ReceivePort _receivePort = ReceivePort();
   bool _isInitialized = false;
+  
+  // Add the centralized SIM number as a class variable
+  String _centralizedSimNumber = "+919952834280"; // Default value
 
   @override
   void initState() {
     super.initState();
+    _loadSettings(); // Load settings including the centralized number
     _initializeSmsListener();
+  }
+  
+  // Method to load settings (in a real app, this would load from SharedPreferences or similar)
+  Future<void> _loadSettings() async {
+    // In a real app, you would load from persistent storage
+    // For example: _centralizedSimNumber = await _loadCentralizedNumberFromStorage();
+    
+    // For now, we'll just use the default value
+    setState(() {
+      // Using a default value, but this is where you'd set it from settings
+      _centralizedSimNumber = "+919952834280"; 
+    });
+  }
+  
+  // Add a method to update the centralized number
+  void _updateCentralizedNumber(String newNumber) {
+    setState(() {
+      _centralizedSimNumber = newNumber;
+    });
+    // In a real app, you'd also save this to persistent storage
+    // _saveCentralizedNumberToStorage(newNumber);
   }
 
   @override
@@ -189,6 +214,50 @@ class _IotSmsListenerPageState extends State<IotSmsListenerPage> {
     });
     await _sendToListenerGateway(message);
   }
+  
+  // Add a dialog to configure the centralized number
+  void _showSettingsDialog() {
+    final TextEditingController controller = TextEditingController(
+      text: _centralizedSimNumber
+    );
+    
+    showDialog(
+      context: context,
+      builder: (BuildContext context) {
+        return AlertDialog(
+          title: const Text('Settings'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: controller,
+                decoration: const InputDecoration(
+                  labelText: 'Centralized SIM Number',
+                  hintText: 'Enter phone number with country code',
+                ),
+                keyboardType: TextInputType.phone,
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () {
+                Navigator.of(context).pop();
+              },
+              child: const Text('Cancel'),
+            ),
+            TextButton(
+              onPressed: () {
+                _updateCentralizedNumber(controller.text);
+                Navigator.of(context).pop();
+              },
+              child: const Text('Save'),
+            ),
+          ],
+        );
+      },
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -197,43 +266,92 @@ class _IotSmsListenerPageState extends State<IotSmsListenerPage> {
         title: const Text('IOT Messages'),
         backgroundColor: Colors.blue,
         foregroundColor: Colors.white,
+        actions: [
+          // Add a settings button to the AppBar
+          IconButton(
+            icon: const Icon(Icons.settings),
+            onPressed: () {
+              _showSettingsDialog();
+            },
+          ),
+        ],
       ),
-      body: _messages.isEmpty
-          ? const Center(
-              child: Text('No messages received yet.',
-                style: TextStyle(fontSize: 16),
-              ),
-            )
-          : ListView.builder(
-              itemCount: _messages.length,
-              itemBuilder: (context, index) {
-                final message = _messages[index];
-                return Card(
-                  margin: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                  child: ListTile(
-                    title: Text(
-                      message.body,
-                      style: const TextStyle(fontWeight: FontWeight.w500),
-                    ),
-                    subtitle: Text(
-                      '${message.address} • ${_formatDate(message.date)}',
-                    ),
-                    trailing: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        _buildStatusIcon(message.status),
-                        if (message.status == MessageStatus.failed)
-                          IconButton(
-                            icon: const Icon(Icons.refresh),
-                            onPressed: () => _retryMessage(message),
-                            tooltip: 'Retry',
+      body: Column(
+        children: [
+          // Display the current centralized number
+          Padding(
+            padding: const EdgeInsets.all(8.0),
+            child: Card(
+              child: Padding(
+                padding: const EdgeInsets.all(12.0),
+                child: Row(
+                  children: [
+                    const Icon(Icons.sim_card, color: Colors.blue),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Text(
+                            'Centralized SIM',
+                            style: TextStyle(
+                              fontSize: 14,
+                              fontWeight: FontWeight.bold,
+                            ),
                           ),
-                      ],
+                          Text(
+                            _centralizedSimNumber,
+                            style: const TextStyle(fontSize: 16),
+                          ),
+                        ],
+                      ),
                     ),
-                  ),
-                );
-              },
+                  ],
+                ),
+              ),
             ),
+          ),
+          // Messages list
+          Expanded(
+            child: _messages.isEmpty
+                ? const Center(
+                    child: Text('No messages received yet.',
+                      style: TextStyle(fontSize: 16),
+                    ),
+                  )
+                : ListView.builder(
+                    itemCount: _messages.length,
+                    itemBuilder: (context, index) {
+                      final message = _messages[index];
+                      return Card(
+                        margin: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                        child: ListTile(
+                          title: Text(
+                            message.body,
+                            style: const TextStyle(fontWeight: FontWeight.w500),
+                          ),
+                          subtitle: Text(
+                            '${message.address} • ${_formatDate(message.date)}',
+                          ),
+                          trailing: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              _buildStatusIcon(message.status),
+                              if (message.status == MessageStatus.failed)
+                                IconButton(
+                                  icon: const Icon(Icons.refresh),
+                                  onPressed: () => _retryMessage(message),
+                                  tooltip: 'Retry',
+                                ),
+                            ],
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+          ),
+        ],
+      ),
     );
   }
 

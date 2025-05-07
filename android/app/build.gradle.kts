@@ -7,8 +7,8 @@ plugins {
 
 android {
     namespace = "com.example.iot_sms_listener"
-    compileSdk = 34
-    ndkVersion = flutter.ndkVersion
+    compileSdk = 35
+    ndkVersion = "27.0.12077973"
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_11
