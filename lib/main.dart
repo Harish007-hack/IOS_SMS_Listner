@@ -5,6 +5,7 @@ import 'dart:ui';
 
 import 'package:another_telephony/telephony.dart';
 import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 // Message status enum
 enum MessageStatus {
@@ -28,23 +29,136 @@ class IotMessage {
     this.status = MessageStatus.pending,
     this.retryCount = 0,
   });
-}
 
-// Background handler for SMS messages
-@pragma('vm:entry-point')
-void onBackgroundMessage(SmsMessage message) async {
-  // Send a message to the main isolate to handle the SMS
-  final SendPort? sendPort = IsolateNameServer.lookupPortByName('sms_isolate');
-  if (sendPort != null) {
-    sendPort.send({
-      'body': message.body,
-      'address': message.address,
-      'date': message.date,
-    });
+  // Convert to map for storage
+  Map<String, dynamic> toJson() {
+    return {
+      'body': body,
+      'address': address,
+      'date': date.millisecondsSinceEpoch,
+      'status': status.index,
+      'retryCount': retryCount,
+    };
+  }
+
+  // Create from stored map
+  factory IotMessage.fromJson(Map<String, dynamic> json) {
+    return IotMessage(
+      body: json['body'],
+      address: json['address'],
+      date: DateTime.fromMillisecondsSinceEpoch(json['date']),
+      status: MessageStatus.values[json['status']],
+      retryCount: json['retryCount'],
+    );
   }
 }
 
-void main() {
+// Static variable to store centralized SIM number across app lifecycle
+String centralizedSimNumber = "+123456789";
+
+// Background handler for SMS messages
+// This runs in a separate isolate when app is terminated
+@pragma('vm:entry-point')
+void onBackgroundMessage(SmsMessage message) async {
+  // Process the SMS in the background
+  try {
+    // Load stored messages
+    final prefs = await SharedPreferences.getInstance();
+    final String? storedMessages = prefs.getString('iot_messages');
+    List<IotMessage> messages = [];
+    
+    if (storedMessages != null) {
+      final List<dynamic> decoded = jsonDecode(storedMessages);
+      messages = decoded.map((item) => IotMessage.fromJson(item)).toList();
+    }
+    
+    // Add new message
+    final newMessage = IotMessage(
+      body: message.body ?? "No content",
+      address: message.address ?? "Unknown",
+      date: DateTime.fromMillisecondsSinceEpoch(message.date ?? DateTime.now().millisecondsSinceEpoch),
+    );
+    
+    messages.insert(0, newMessage);
+    
+    // Store back
+    final jsonMessages = jsonEncode(messages.map((m) => m.toJson()).toList());
+    await prefs.setString('iot_messages', jsonMessages);
+    
+    // Send to listener gateway (in background)
+    await _sendToListenerGatewayBackground(newMessage, prefs);
+  } catch (e) {
+    print("Error in background processing: $e");
+  }
+}
+
+// Helper function for background processing
+Future<void> _sendToListenerGatewayBackground(IotMessage message, SharedPreferences prefs) async {
+  // Simulate API call 
+  await Future.delayed(const Duration(seconds: 1));
+  final bool success = DateTime.now().millisecond % 10 < 8; // 80% chance
+  
+  if (success) {
+    message.status = MessageStatus.success;
+  } else {
+    message.retryCount++;
+    if (message.retryCount < 2) {
+      // Try again
+      await Future.delayed(const Duration(seconds: 1));
+      final bool retrySuccess = DateTime.now().millisecond % 10 < 8;
+      if (retrySuccess) {
+        message.status = MessageStatus.success;
+      } else {
+        message.retryCount++;
+        message.status = MessageStatus.failed;
+      }
+    } else {
+      message.status = MessageStatus.failed;
+    }
+  }
+  
+  // Update the message in storage
+  final String? storedMessages = prefs.getString('iot_messages');
+  if (storedMessages != null) {
+    final List<dynamic> decoded = jsonDecode(storedMessages);
+    List<IotMessage> messages = decoded.map((item) => IotMessage.fromJson(item)).toList();
+    
+    // Find and update the message
+    final index = messages.indexWhere((m) => 
+        m.body == message.body && 
+        m.address == message.address && 
+        m.date.millisecondsSinceEpoch == message.date.millisecondsSinceEpoch);
+    
+    if (index >= 0) {
+      messages[index].status = message.status;
+      messages[index].retryCount = message.retryCount;
+      
+      // Store back
+      final jsonMessages = jsonEncode(messages.map((m) => m.toJson()).toList());
+      await prefs.setString('iot_messages', jsonMessages);
+    }
+  }
+}
+
+void main() async {
+  // Ensure Flutter is initialized
+  WidgetsFlutterBinding.ensureInitialized();
+  
+  // Initialize telephony early
+  final telephony = Telephony.instance;
+  await telephony.requestPhoneAndSmsPermissions;
+  
+  // Register callback for background messages
+  telephony.listenIncomingSms(
+    onNewMessage: (SmsMessage message) {}, // Will be overridden in app
+    onBackgroundMessage: onBackgroundMessage,
+    listenInBackground: true, // Enable background listening
+  );
+  
+  // Load centralized SIM number from storage
+  final prefs = await SharedPreferences.getInstance();
+  centralizedSimNumber = prefs.getString('centralized_sim') ?? "+123456789";
+  
   runApp(const MyApp());
 }
 
@@ -71,48 +185,59 @@ class IotSmsListenerPage extends StatefulWidget {
   State<IotSmsListenerPage> createState() => _IotSmsListenerPageState();
 }
 
-class _IotSmsListenerPageState extends State<IotSmsListenerPage> {
-  final List<IotMessage> _messages = [];
+class _IotSmsListenerPageState extends State<IotSmsListenerPage> with WidgetsBindingObserver {
+  List<IotMessage> _messages = [];
   final telephony = Telephony.instance;
-  final ReceivePort _receivePort = ReceivePort();
   bool _isInitialized = false;
-  
-  // Add the centralized SIM number as a class variable
-  String _centralizedSimNumber = "+919952834280"; // Default value
 
   @override
   void initState() {
     super.initState();
-    _loadSettings(); // Load settings including the centralized number
+    WidgetsBinding.instance.addObserver(this); // Listen for app lifecycle changes
     _initializeSmsListener();
+    _loadMessages(); // Load previously stored messages
   }
   
-  // Method to load settings (in a real app, this would load from SharedPreferences or similar)
-  Future<void> _loadSettings() async {
-    // In a real app, you would load from persistent storage
-    // For example: _centralizedSimNumber = await _loadCentralizedNumberFromStorage();
-    
-    // For now, we'll just use the default value
-    setState(() {
-      // Using a default value, but this is where you'd set it from settings
-      _centralizedSimNumber = "+919952834280"; 
-    });
-  }
-  
-  // Add a method to update the centralized number
-  void _updateCentralizedNumber(String newNumber) {
-    setState(() {
-      _centralizedSimNumber = newNumber;
-    });
-    // In a real app, you'd also save this to persistent storage
-    // _saveCentralizedNumberToStorage(newNumber);
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      // App came to foreground, refresh messages
+      _loadMessages();
+    }
   }
 
   @override
   void dispose() {
-    IsolateNameServer.removePortNameMapping('sms_isolate');
-    _receivePort.close();
+    WidgetsBinding.instance.removeObserver(this);
     super.dispose();
+  }
+
+  // Load messages from persistent storage
+  Future<void> _loadMessages() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final String? storedMessages = prefs.getString('iot_messages');
+      
+      if (storedMessages != null) {
+        final List<dynamic> decoded = jsonDecode(storedMessages);
+        setState(() {
+          _messages = decoded.map((item) => IotMessage.fromJson(item)).toList();
+        });
+      }
+    } catch (e) {
+      print("Error loading messages: $e");
+    }
+  }
+  
+  // Save messages to persistent storage
+  Future<void> _saveMessages() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final jsonMessages = jsonEncode(_messages.map((m) => m.toJson()).toList());
+      await prefs.setString('iot_messages', jsonMessages);
+    } catch (e) {
+      print("Error saving messages: $e");
+    }
   }
 
   void _onSmsReceived(SmsMessage message) {
@@ -127,28 +252,11 @@ class _IotSmsListenerPageState extends State<IotSmsListenerPage> {
     });
     
     _sendToListenerGateway(newMessage);
+    _saveMessages(); // Save messages when new one is received
   }
 
   Future<void> _initializeSmsListener() async {
     if (_isInitialized) return;
-
-    // Register the receive port for background messages
-    IsolateNameServer.registerPortWithName(_receivePort.sendPort, 'sms_isolate');
-    _receivePort.listen((dynamic message) {
-      if (message is Map) {
-        final smsMessage = IotMessage(
-          body: message['body'] ?? "No content",
-          address: message['address'] ?? "Unknown",
-          date: DateTime.fromMillisecondsSinceEpoch(message['date'] ?? DateTime.now().millisecondsSinceEpoch),
-        );
-        
-        setState(() {
-          _messages.insert(0, smsMessage);
-        });
-        
-        _sendToListenerGateway(smsMessage);
-      }
-    });
 
     // Request permissions
     final bool? result = await telephony.requestPhoneAndSmsPermissions;
@@ -166,7 +274,7 @@ class _IotSmsListenerPageState extends State<IotSmsListenerPage> {
 
   Future<bool> _mockApiCall() async {
     // Simulate API call with 80% success rate
-    await Future.delayed(const Duration(seconds: 2));
+    await Future.delayed(const Duration(seconds: 1));
     return DateTime.now().millisecond % 10 < 8; // 80% chance of success
   }
 
@@ -205,6 +313,9 @@ class _IotSmsListenerPageState extends State<IotSmsListenerPage> {
         });
       }
     }
+    
+    // Save updated message status
+    _saveMessages();
   }
 
   Future<void> _retryMessage(IotMessage message) async {
@@ -215,10 +326,20 @@ class _IotSmsListenerPageState extends State<IotSmsListenerPage> {
     await _sendToListenerGateway(message);
   }
   
-  // Add a dialog to configure the centralized number
+  // Update centralized SIM number
+  Future<void> _updateCentralizedNumber(String newNumber) async {
+    setState(() {
+      centralizedSimNumber = newNumber;
+    });
+    
+    // Save to persistent storage
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('centralized_sim', newNumber);
+  }
+  
   void _showSettingsDialog() {
     final TextEditingController controller = TextEditingController(
-      text: _centralizedSimNumber
+      text: centralizedSimNumber
     );
     
     showDialog(
@@ -267,7 +388,6 @@ class _IotSmsListenerPageState extends State<IotSmsListenerPage> {
         backgroundColor: Colors.blue,
         foregroundColor: Colors.white,
         actions: [
-          // Add a settings button to the AppBar
           IconButton(
             icon: const Icon(Icons.settings),
             onPressed: () {
@@ -300,7 +420,7 @@ class _IotSmsListenerPageState extends State<IotSmsListenerPage> {
                             ),
                           ),
                           Text(
-                            _centralizedSimNumber,
+                            centralizedSimNumber,
                             style: const TextStyle(fontSize: 16),
                           ),
                         ],
